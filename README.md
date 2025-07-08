@@ -8,6 +8,7 @@ It uses the `fontTools` library to read detailed font metadata, such as full nam
 
 ## 🎯 Features
 
+- Edit existing shapestring (select a shapestring and run the macro)
 - Browse and preview all installed fonts.
 - Fonts are displayed in their actual style (Bold, Italic, etc.) in a drop-down list.
 - Live preview of your custom text with the selected font.
@@ -15,6 +16,7 @@ It uses the `fontTools` library to read detailed font metadata, such as full nam
 - Create or update a `Draft ShapeString` object in the FreeCAD document.
 - Expression support for position and size parameters.
 - Full Unicode support.
+- Support color
 
 ## 🛠 Requirements
 

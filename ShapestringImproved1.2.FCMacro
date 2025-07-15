@@ -1,0 +1,1085 @@
+# Shapestring improved for FreeCAD
+# 
+# Copyright (C) 2025 Grubuntu
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public
+# License as published by the Free Software Foundation; either
+# version 2.1 of the License, or (at your option) any later version.
+#
+# This library is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public
+# License along with this library; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301 USA
+
+# Attribution:
+# http://forum.freecadweb.org/
+# http://www.freecadweb.org/wiki/index.php?title=Code_snippets
+#
+
+DEBUG = False
+
+VERSION = "1.2"
+
+import os
+import json
+import FreeCAD as App
+import FreeCADGui as Gui
+import Draft
+import math
+from PySide import QtWidgets, QtGui, QtCore
+from PySide.QtGui import QFont, QFontDatabase, QColor
+from fontTools.ttLib import TTFont, TTCollection
+from FreeCAD import Vector, Rotation, Placement, Units
+from packaging import version
+from PySide.QtWidgets import QFileDialog, QColorDialog
+from time import perf_counter
+
+FONT_EXTENSIONS = (".ttf", ".otf", ".ttc", ".woff", ".woff2")
+
+FONT_DIRS = [
+            os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts"),
+            os.path.expanduser("~/.fonts"),
+            os.path.expanduser("~/.local/share/fonts"),
+            "/usr/share/fonts",
+            "/Library/Fonts",
+            "/System//Library/Fonts",
+        ]
+
+PREFPARAM = App.ParamGet("User parameter:BaseApp/Preferences/")
+USERPARAM = App.ParamGet("User parameter:BaseApp/Preferences/ShapestringImproved/")
+USERFONTPARAM = App.ParamGet("User parameter:BaseApp/Preferences/ShapestringImproved/UserFonts/")
+UNITSCHEMA = App.ParamGet("User parameter:BaseApp/Preferences/Units").GetInt("UserSchema")
+
+iconAddFile = QtGui.QApplication.style().standardIcon(QtGui.QStyle.StandardPixmap.SP_FileDialogStart)
+iconNewFolder = QtGui.QApplication.style().standardIcon(QtGui.QStyle.StandardPixmap.SP_FileDialogNewFolder)
+# iconReload = QtGui.QApplication.style().standardIcon(QtGui.QStyle.StandardPixmap.SP_BrowserReload)
+iconReset = QtGui.QApplication.style().standardIcon(QtGui.QStyle.StandardPixmap.SP_DialogResetButton)
+
+class ShapestringImproved(QtWidgets.QWidget):
+    def __init__(self, font_dir=None):
+        super().__init__()
+        ui = Gui.UiLoader()
+        self.setWindowTitle("Shapestring Improved " + VERSION + " by Grubuntu")
+        self.shape_string = None
+        self._updating = False
+        self._update_timer = QtCore.QTimer()
+        self._update_timer.setSingleShot(True)
+        self._update_timer.timeout.connect(self.update_shapestring)
+        self.editMode = False
+
+        self.label = ""
+        self.insert_location = {}
+        self.justification = ""
+
+        self.red   = 255
+        self.green = 255
+        self.blue  = 255
+        self.alpha = 255
+
+        self.text_input = QtWidgets.QLineEdit("Hello FreeCAD !")
+        self.text_input.setPlaceholderText("Text")
+
+        label_text_input = QtWidgets.QLabel("String")
+        label_text_in_tree = QtWidgets.QLabel("Set the string as name in TreeView")
+        label_x = QtWidgets.QLabel("X")
+        label_y = QtWidgets.QLabel("Y")
+        label_z = QtWidgets.QLabel("Z")
+        label_axis_x = QtWidgets.QLabel("X Axis")
+        label_axis_y = QtWidgets.QLabel("Y Axis")
+        label_axis_z = QtWidgets.QLabel("Z Axis")
+        label_size = QtWidgets.QLabel("Size")
+        label_angle = QtWidgets.QLabel("Angle")
+        label_tracking = QtWidgets.QLabel("Tracking")
+        label_oblique_angle = QtWidgets.QLabel("Oblique Angle")
+        label_justification = QtWidgets.QLabel("Justification (placement)")
+        label_make_face = QtWidgets.QLabel("Make Face")
+        label_recompute = QtWidgets.QLabel("Recompute advanced settings")
+        label_recompute.setToolTip("Uncheck to improve performance with heavy fonts, but this will not update all changes.")
+        self.label_shape_color = QtWidgets.QLabel("Shape color")
+        label_reset = QtWidgets.QLabel("Reset all values")
+        label_placement = QtWidgets.QLabel("Show placement")
+        label_plane = QtWidgets.QLabel("Show plane")
+
+        reset_button_group_text = QtWidgets.QToolButton()
+        reset_button_group_text.setToolTip("Reset text to default")
+        reset_button_group_text.setIcon(iconReset)
+        reset_button_group_text.clicked.connect(lambda : self.on_reset_default(1))
+
+        reset_button_group_pos = QtWidgets.QToolButton()
+        reset_button_group_pos.setToolTip("Reset position to default")
+        reset_button_group_pos.setIcon(iconReset)
+        reset_button_group_pos.clicked.connect(lambda : self.on_reset_default(2))
+        
+        reset_button_group_rot = QtWidgets.QToolButton()
+        reset_button_group_rot.setToolTip("Reset rotation to default")
+        reset_button_group_rot.setIcon(iconReset)
+        reset_button_group_rot.clicked.connect(lambda : self.on_reset_default(3))
+
+        reset_button_group_set = QtWidgets.QToolButton()
+        reset_button_group_set.setToolTip("Reset advanced settings to default")
+        reset_button_group_set.setIcon(iconReset)
+        reset_button_group_set.clicked.connect(lambda : self.on_reset_default(4))
+
+        reset_button_group_col = QtWidgets.QToolButton()
+        reset_button_group_col.setToolTip("Reset color settings to default")
+        reset_button_group_col.setIcon(iconReset)
+        reset_button_group_col.clicked.connect(lambda : self.on_reset_default(5))
+
+        self.checkbox_set_name = QtWidgets.QCheckBox()
+        self.checkbox_set_name.blockSignals(True)
+        self.checkbox_set_name.setChecked(False)
+        self.checkbox_set_name.blockSignals(False)
+
+        self.spin_x = ui.createWidget("Gui::QuantitySpinBox")
+        self.spin_x.setFixedWidth(100)
+        self.spin_y = ui.createWidget("Gui::QuantitySpinBox")
+        self.spin_y.setFixedWidth(100)
+        self.spin_z = ui.createWidget("Gui::QuantitySpinBox")
+        self.spin_z.setFixedWidth(100)
+
+        self.spin_axis_x = ui.createWidget("Gui::QuantitySpinBox")
+        self.spin_axis_x.setFixedWidth(60)
+        self.spin_axis_x.setProperty('minimum', -1)
+        self.spin_axis_x.setProperty('maximum', 1)
+        self.spin_axis_y = ui.createWidget("Gui::QuantitySpinBox")
+        self.spin_axis_y.setFixedWidth(60)
+        self.spin_axis_y.setProperty('minimum', -1)
+        self.spin_axis_y.setProperty('maximum', 1)
+        self.spin_axis_z = ui.createWidget("Gui::QuantitySpinBox")
+        self.spin_axis_z.setFixedWidth(60)
+        self.spin_axis_z.setProperty('minimum', -1)
+        self.spin_axis_z.setProperty('maximum', 1)
+
+        self.spin_angle = ui.createWidget("Gui::QuantitySpinBox")
+        self.spin_angle.setFixedWidth(80)
+        self.spin_angle.setProperty('minimum', -360.0)
+        self.spin_angle.setProperty('maximum', 360.0)
+
+        self.spin_tracking = ui.createWidget("Gui::QuantitySpinBox")
+        self.spin_tracking.setFixedWidth(100)
+        self.spin_tracking.setProperty('minimum', 0.0)
+        self.spin_tracking.setProperty('maximum', 10000)
+
+        self.spin_oblique_angle = ui.createWidget("Gui::QuantitySpinBox")
+        self.spin_oblique_angle.setFixedWidth(100)
+        self.spin_oblique_angle.setProperty('minimum', -80.0)
+        self.spin_oblique_angle.setProperty('maximum', 80.0)
+
+        self.spin_size = ui.createWidget("Gui::QuantitySpinBox")
+        self.spin_size.setFixedWidth(100)
+        self.spin_size.setProperty('minimum', 1)
+        self.spin_size.setProperty('maximum', 10000)
+        self.spin_size.setProperty('rawValue', 14)
+
+        self.size_layout = QtWidgets.QHBoxLayout()
+        self.size_layout.addWidget(label_size)
+        self.size_layout.addStretch()
+        self.size_layout.addWidget(self.spin_size)
+
+        self.tracking_layout = QtWidgets.QHBoxLayout()
+        self.tracking_layout.addWidget(label_tracking)
+        self.tracking_layout.addStretch()
+        self.tracking_layout.addWidget(self.spin_tracking)
+
+        self.oblique_layout = QtWidgets.QHBoxLayout()
+        self.oblique_layout.addWidget(label_oblique_angle)
+        self.oblique_layout.addStretch()
+        self.oblique_layout.addWidget(self.spin_oblique_angle)
+
+        self.combo_justification = QtWidgets.QComboBox()
+
+        self.checkbox_make_face = QtWidgets.QCheckBox()
+        self.checkbox_make_face.blockSignals(True)
+        self.checkbox_make_face.setChecked(True)
+        self.checkbox_make_face.blockSignals(False)
+
+        self.checkbox_recompute = QtWidgets.QCheckBox()
+        self.checkbox_recompute.blockSignals(True)
+        self.checkbox_recompute.setChecked(True)
+        self.checkbox_recompute.blockSignals(False)
+
+        self.justification_layout = QtWidgets.QHBoxLayout()
+        self.justification_layout.addWidget(label_justification)
+        self.justification_layout.addStretch()
+        self.justification_layout.addWidget(self.combo_justification)
+
+        self.button_color = QtWidgets.QToolButton()
+        self.button_color.clicked.connect(self.on_button_color)
+
+        color_layout = QtWidgets.QHBoxLayout()
+        color_layout.addWidget(self.button_color)
+        color_layout.addWidget(self.label_shape_color)
+
+        self.current_color = QColor(self.red, self.blue, self.green, self.alpha)
+        self.update_button_style()
+
+        self.make_face_layout = QtWidgets.QHBoxLayout()
+        self.make_face_layout.addWidget(self.checkbox_make_face)
+        self.make_face_layout.addWidget(label_make_face)
+        self.make_face_layout.addStretch()
+        self.make_face_layout.addLayout(color_layout)
+
+        self.recompute_layout = QtWidgets.QHBoxLayout()
+        self.recompute_layout.addWidget(self.checkbox_recompute)
+        self.recompute_layout.addWidget(label_recompute)
+        self.recompute_layout.addStretch()
+        self.recompute_layout.addWidget(reset_button_group_set)
+
+        self.combo_fonts = QtWidgets.QComboBox()
+        self.combo_fonts.view().window().installEventFilter(self)
+        self.combo_fonts.installEventFilter(self)
+
+        self.add_font = QtWidgets.QToolButton()
+        self.add_font.setToolTip("Add a font file")
+        self.add_font.setIcon(iconAddFile)
+        
+        self.add_directory = QtWidgets.QToolButton()
+        self.add_directory.setToolTip("Add a directory")
+        self.add_directory.setIcon(iconNewFolder)
+
+        self.fonts_layout = QtWidgets.QHBoxLayout()
+        self.fonts_layout.addWidget(self.combo_fonts)
+        self.fonts_layout.addWidget(self.add_font)
+        self.fonts_layout.addWidget(self.add_directory)
+
+        main_layout = QtWidgets.QVBoxLayout(self)
+
+        pos_layout = QtWidgets.QHBoxLayout()
+        pos_layout.addWidget(label_x)
+        pos_layout.addWidget(self.spin_x)
+        pos_layout.addStretch()
+        pos_layout.addWidget(label_y)
+        pos_layout.addWidget(self.spin_y)
+        pos_layout.addStretch()
+        pos_layout.addWidget(label_z)
+        pos_layout.addWidget(self.spin_z)
+        pos_layout.addWidget(reset_button_group_pos)
+
+        rotation_layout = QtWidgets.QHBoxLayout()
+        rotation_layout.addWidget(label_angle)
+        rotation_layout.addWidget(self.spin_angle)
+        rotation_layout.addStretch()
+        rotation_layout.addWidget(label_axis_x)
+        rotation_layout.addWidget(self.spin_axis_x)
+        rotation_layout.addStretch()
+        rotation_layout.addWidget(label_axis_y)
+        rotation_layout.addWidget(self.spin_axis_y)
+        rotation_layout.addStretch()
+        rotation_layout.addWidget(label_axis_z)
+        rotation_layout.addWidget(self.spin_axis_z)
+        rotation_layout.addWidget(reset_button_group_rot)
+
+        pos_group = QtWidgets.QGroupBox("Position")
+        pos_group.setLayout(pos_layout)
+
+        rot_group = QtWidgets.QGroupBox("Rotation")
+        rot_group.setLayout(rotation_layout)
+
+        self.text_layout = QtWidgets.QHBoxLayout()
+        self.text_layout.addWidget(label_text_input)
+        self.text_layout.addWidget(self.text_input)
+        self.text_layout.addWidget(reset_button_group_text)
+
+        self.layout_checkbox_set_name = QtWidgets.QHBoxLayout()
+        self.layout_checkbox_set_name.addWidget(self.checkbox_set_name)
+        self.layout_checkbox_set_name.addWidget(label_text_in_tree)
+        self.layout_checkbox_set_name.addStretch()
+
+        self.string_layout = QtWidgets.QVBoxLayout()
+        self.string_layout.addLayout(self.text_layout)
+        self.string_layout.addLayout(self.fonts_layout)
+        self.string_layout.addLayout(self.layout_checkbox_set_name)
+
+        text_group = QtWidgets.QGroupBox("Text")
+        text_group.setLayout(self.string_layout)
+
+        self.other_set_layout = QtWidgets.QVBoxLayout()
+        self.other_set_layout.addLayout(self.recompute_layout)
+        self.other_set_layout.addLayout(self.size_layout)
+        self.other_set_layout.addLayout(self.tracking_layout)
+
+        self.checkbox_placement = QtWidgets.QCheckBox()
+        self.checkbox_placement.blockSignals(True)
+        self.checkbox_placement.setChecked(False)
+        self.checkbox_placement.blockSignals(False)
+
+        self.checkbox_plane = QtWidgets.QCheckBox()
+        self.checkbox_plane.blockSignals(True)
+        self.checkbox_plane.setChecked(False)
+        self.checkbox_plane.blockSignals(False)
+
+        self.table_user_fonts = QtWidgets.QTableWidget()
+        self.table_user_fonts.setColumnCount(3)
+        self.table_user_fonts.setHorizontalHeaderLabels(["Name", "Path", ""])
+        self.table_user_fonts.setColumnWidth(2, 30)
+        self.table_user_fonts.setSortingEnabled(True)
+        self.table_user_fonts.setFixedHeight(180)
+        self.table_user_fonts.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.table_user_fonts.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.table_user_fonts.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.table_user_fonts.verticalHeader().setVisible(False)
+        self.table_user_fonts.setShowGrid(False)
+        self.table_user_fonts.setAlternatingRowColors(True)
+        self.table_user_fonts.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.table_user_fonts.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.Fixed)
+
+        header = self.table_user_fonts.horizontalHeader()
+        header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QtWidgets.QHeaderView.Fixed)
+
+        self.user_fonts_layout = QtWidgets.QVBoxLayout()
+        self.user_fonts_layout.addWidget(self.table_user_fonts)
+
+        user_fonts_group = QtWidgets.QGroupBox("Manage fonts added by the user")
+        user_fonts_group.setLayout(self.user_fonts_layout)
+
+        self.fonts = self.scan_and_parse_fonts()
+        self.load_fonts_in_combo()
+
+        self.load_parameters()
+        self.update_shapestring()
+
+        layout_show_placement = QtWidgets.QHBoxLayout()
+        layout_show_placement.addWidget(self.checkbox_placement)
+        layout_show_placement.addWidget(label_placement)
+        layout_show_placement.addStretch()
+        
+        layout_show_plane = QtWidgets.QHBoxLayout()
+        layout_show_plane.addWidget(self.checkbox_plane)
+        layout_show_plane.addWidget(label_plane)
+        layout_show_plane.addStretch()
+
+        self.central_Layout = QtWidgets.QVBoxLayout()
+
+        obj = self.shape_string
+        if hasattr (obj, "ObliqueAngle"):
+            self.central_Layout.addLayout(self.oblique_layout)
+        if hasattr (obj.ViewObject, "ShowPlane"):
+            self.central_Layout.addLayout(layout_show_plane)
+        if hasattr (obj.ViewObject, "ShowPlacement"):
+            self.central_Layout.addLayout(layout_show_placement)
+
+        self.other_set_layout.addLayout(self.central_Layout)
+        layout_show_placement.addLayout(self.justification_layout)
+
+        self.other_set_layout.addLayout(self.make_face_layout)
+
+        set_group = QtWidgets.QGroupBox("Advanced settings")
+        set_group.setLayout(self.other_set_layout)
+
+        main_layout.addWidget(text_group)
+        main_layout.addWidget(pos_group)
+        main_layout.addWidget(rot_group)
+        main_layout.addWidget(set_group)
+        main_layout.addWidget(user_fonts_group)
+
+        length_unit = Units.Quantity("1 mm").getUserPreferred(UNITSCHEMA)[0]
+        angle_unit = Units.Quantity("1 °").getUserPreferred(UNITSCHEMA)[0]
+
+        if hasattr (obj, "Justification"):
+            self.list_justifications = self.shape_string.getEnumerationsOfProperty("Justification")
+            self.combo_justification.blockSignals(True)
+            self.combo_justification.addItems(self.list_justifications)
+            index = self.combo_justification.findText(self.justification)
+            if index != -1:
+                self.combo_justification.setCurrentIndex(index)
+
+            self.combo_justification.blockSignals(False)
+
+            Gui.ExpressionBinding(self.spin_oblique_angle).bind(self.shape_string, "ObliqueAngle.Value")
+            self.spin_oblique_angle.setProperty('unit', angle_unit)
+
+        self.spin_x.setProperty('unit', length_unit)
+        self.spin_y.setProperty('unit', length_unit)
+        self.spin_z.setProperty('unit', length_unit)
+        self.spin_size.setProperty('unit', length_unit)
+        self.spin_tracking.setProperty('unit', length_unit)
+        self.spin_angle.setProperty('unit', angle_unit)
+
+        self.spin_axis_x.setProperty('rawValue', self.shape_string.Placement.Rotation.Axis.x)
+        self.spin_axis_y.setProperty('rawValue', self.shape_string.Placement.Rotation.Axis.y)
+        self.spin_axis_z.setProperty('rawValue', self.shape_string.Placement.Rotation.Axis.z)
+
+        Gui.ExpressionBinding(self.spin_x).bind(self.shape_string, "Placement.Base.x")
+        Gui.ExpressionBinding(self.spin_y).bind(self.shape_string, "Placement.Base.y")
+        Gui.ExpressionBinding(self.spin_z).bind(self.shape_string, "Placement.Base.z")
+        Gui.ExpressionBinding(self.spin_size).bind(self.shape_string, "Size.Value")
+        Gui.ExpressionBinding(self.spin_tracking).bind(self.shape_string, "Tracking.Value")
+
+        self.text_input.textChanged.connect(self.update_shapestring)
+        self.spin_x.valueChanged.connect(self.on_spin_changed)
+        self.spin_y.valueChanged.connect(self.on_spin_changed)
+        self.spin_z.valueChanged.connect(self.on_spin_changed)
+        self.spin_axis_x.valueChanged.connect(self.on_spin_changed)
+        self.spin_axis_y.valueChanged.connect(self.on_spin_changed)
+        self.spin_axis_z.valueChanged.connect(self.on_spin_changed)
+        self.spin_angle.valueChanged.connect(self.on_spin_changed)
+        self.spin_tracking.valueChanged.connect(self.on_spin_changed)
+        self.spin_oblique_angle.valueChanged.connect(self.on_spin_changed)
+        self.spin_size.valueChanged.connect(self.on_spin_changed)
+        self.combo_justification.currentIndexChanged.connect(self.on_spin_changed)
+        self.checkbox_make_face.stateChanged.connect(self.on_spin_changed)
+        self.checkbox_recompute.stateChanged.connect(self.on_spin_changed)
+        self.combo_fonts.currentIndexChanged.connect(lambda : self.update_shapestring(True))
+        self.combo_fonts.view().verticalScrollBar().valueChanged.connect(self.apply_fonts_to_visible_items)
+        self.add_font.clicked.connect(self.add_font_file)
+        self.add_directory.clicked.connect(self.add_font_directory)
+        self.table_user_fonts.itemSelectionChanged.connect(self.on_user_font_select)
+        self.checkbox_placement.stateChanged.connect(self.on_appearance_changed)
+        self.checkbox_plane.stateChanged.connect(self.on_appearance_changed)
+        self.checkbox_set_name.stateChanged.connect(self.update_shapestring)
+
+        if DEBUG:
+            print(f"Finished in {round(perf_counter() - ti, 2)} seconds")
+            
+            missing_attrs = self.listMissingAttributes()
+            if missing_attrs:
+                print("Attributs manquants :", missing_attrs)
+
+    def listMissingAttributes(self):
+        """For debug: list missing attributes"""
+        missing = []
+
+        def check(obj, attr_name, prop_type="App::PropertyString", group="Custom"):
+            if not hasattr(obj, attr_name):
+                try:
+                    # obj.addProperty(prop_type, attr_name, group)
+                    missing.append(attr_name)
+                except Exception as e:
+                    missing.append(f"{attr_name} (error: {e})")
+
+        # Propriétés sur l'objet de base
+        base_attributes = {
+            "String": "App::PropertyString",
+            "FontFile": "App::PropertyFile",
+            "Size": "App::PropertyFloat",
+            "Tracking": "App::PropertyFloat",
+            "Label": "App::PropertyString",
+            "Name": "App::PropertyString",
+            "ObliqueAngle": "App::PropertyFloat",
+            "Justification": "App::PropertyEnumeration",
+            "MakeFace": "App::PropertyBool",
+            "Placement": "App::PropertyPlacement",
+        }
+
+        # Propriétés dans le ViewObject
+        view_attributes = {
+            "ShowPlacement": "App::PropertyBool",
+            "ShowPlane": "App::PropertyBool",
+            "ShapeColor": "App::PropertyColor",
+            "Transparency": "App::PropertyInteger",
+        }
+
+        obj = self.shape_string
+        for attr, prop_type in base_attributes.items():
+            check(obj, attr, prop_type)
+
+        vo = getattr(obj, "ViewObject", None)
+        if vo:
+            for attr, prop_type in view_attributes.items():
+                check(vo, attr, prop_type)
+
+        return missing
+
+    def on_appearance_changed(self):
+        self.shape_string.ViewObject.ShowPlacement = self.checkbox_placement.isChecked()
+        self.shape_string.ViewObject.ShowPlane = self.checkbox_plane.isChecked()
+
+    def update_button_style(self):
+            """Met à jour l'apparence du bouton selon la couleur actuelle"""
+            if self.checkbox_make_face.isChecked():
+                self.button_color.setStyleSheet(
+                    f"QToolButton {{ background-color: {self.current_color.name()}; border: 1px solid black; }}"
+                )
+            else:
+                self.button_color.setStyleSheet(
+                u"QToolButton {background-color: QPalette.Base}"
+                )
+
+    def on_button_color(self):
+        # Ouvre le QColorDialog avec la couleur actuelle comme couleur de départ
+        couleur = QColorDialog.getColor(initial=self.current_color, parent=self)
+
+        if couleur.isValid():
+            self.current_color = couleur
+            self.update_button_style()
+            self.red   = couleur.redF()
+            self.green = couleur.greenF()
+            self.blue  = couleur.blueF()
+            self.alpha = couleur.alphaF()
+            self.update_shapestring()
+
+            return couleur
+
+    def on_spin_changed(self):
+        """ Timer to avoid blinking and weird behavior """
+        if self._updating:
+            return  # Ne pas réagir pendant une mise à jour
+        # Restart timer for each modification
+        self._update_timer.start(100)
+
+    def scan_and_parse_fonts(self):
+        """ Scan directories FONT_DIRS for fonts via TTFont and return list_fonts """
+        list_fonts = []
+        seen = set()
+
+        for folder in FONT_DIRS:
+            if not os.path.exists(folder):
+                continue
+
+            for root, _, files in os.walk(folder):
+                for file in files:
+                    if not file.lower().endswith(FONT_EXTENSIONS):
+                        continue
+
+                    full_path = os.path.join(root, file)
+                    ########
+                    full_path = full_path.replace("\\", "/")
+                    if full_path in seen:
+                        continue
+                    seen.add(full_path)
+
+                    try:
+                        if file.lower().endswith(".ttc"):
+                            # Collection TTC
+                            ttc = TTCollection(full_path)
+                            for index, font in enumerate(ttc.fonts):
+                                name_record = next((n for n in font["name"].names if n.nameID == 4), None)
+                                family = name_record.toUnicode() if name_record else f"{file}[{index}]"
+                                if family.startswith("."):
+                                    continue
+                                list_fonts.append({"name": family, "path": f"{full_path},{index}"})
+                        else:
+                            # Fonte simple
+                            font = TTFont(full_path)
+                            name_record = next((n for n in font["name"].names if n.nameID == 4), None)
+                            family = name_record.toUnicode() if name_record else os.path.basename(full_path)
+                            if family.startswith("."):
+                                continue
+                            list_fonts.append({"name": family, "path": full_path})
+
+                    except Exception as e:
+                        App.Console.PrintError(f"[ShapestringImproved] 03 Read error {full_path} : {e}\n")
+
+        list_fonts.sort(key=lambda f: f["name"].lower())
+
+        # append user customs fonts to arg[list_fonts] and return list_fonts
+        list_user_fonts = USERFONTPARAM.GetContents()
+        self.table_user_fonts.setRowCount(0)
+
+        def make_remove_func(row, family):
+            return lambda: self.remove_user_font_row(row, family)
+
+        if list_user_fonts:
+            for item in list_user_fonts:
+                family = item[1]
+                full_path = item[2]
+                if not os.path.exists(full_path):
+                    App.Console.PrintMessage(f"{family} not found in: {full_path}\n")
+                    continue
+
+                if list_fonts is not None:
+                    list_fonts.append({"name": family, "path": full_path})
+
+                row = self.table_user_fonts.rowCount()
+                self.table_user_fonts.insertRow(row)
+
+                # Création du bouton Supprimer
+                remove_button = QtWidgets.QToolButton()
+                remove_button.setIcon(QtGui.QIcon.fromTheme("edit-delete"))
+                remove_button.setToolTip("Remove this font")
+                remove_button.setAutoRaise(True)
+                remove_button.setCursor(QtCore.Qt.PointingHandCursor)
+                remove_button.clicked.connect(make_remove_func(row, family))
+
+                # Colonne 0 : nom
+                item_name = QtWidgets.QTableWidgetItem(family)
+                item_name.setTextAlignment(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft)
+                self.table_user_fonts.setItem(row, 0, item_name)
+
+                # Colonne 1 : chemin
+                item_path = QtWidgets.QTableWidgetItem(full_path)
+                item_path.setTextAlignment(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft)
+                self.table_user_fonts.setItem(row, 1, item_path)
+
+                # Colonne 2 : bouton
+                button_widget = QtWidgets.QWidget()
+                layout = QtWidgets.QHBoxLayout(button_widget)
+                layout.addWidget(remove_button)
+                layout.setAlignment(QtCore.Qt.AlignCenter)
+                layout.setContentsMargins(0, 0, 0, 0)
+                self.table_user_fonts.setCellWidget(row, 2, button_widget)
+        return list_fonts
+
+    def load_fonts_in_combo(self):
+        """ Populate combolist with self.fonts """
+        self.combo_fonts.clear()
+        for font in self.fonts:
+            name = font["name"]
+            path = font["path"]
+            self.combo_fonts.addItem(name, userData=path)
+
+    def update_shapestring(self, force=False):
+        """ Update the shapestring in the 3D view """
+        if not App.ActiveDocument:
+            QtWidgets.QMessageBox.warning(self, "Error", "No active document.")
+            return
+
+        index = self.combo_fonts.currentIndex()
+        if index == -1:
+            return
+
+        path = self.combo_fonts.itemData(index)
+        text = self.text_input.text()
+        pos = Vector(self.spin_x.property('value'), self.spin_y.property('value'), self.spin_z.property('value'))
+
+        try:
+            self._updating = True  # prevent recursion
+            if force or not self.shape_string:
+                if self.shape_string:
+                    pass
+                else:
+                    self.shape_string = Draft.make_shapestring(String=text, FontFile=path, Size=20.0, Tracking=0.0)
+                    Draft.autogroup(self.shape_string)
+
+            self.shape_string.String = text
+            self.shape_string.FontFile = path
+            self.shape_string.Size = self.spin_size.property('value')
+            self.shape_string.Tracking = self.spin_tracking.property('value')
+
+            obj = self.shape_string
+            if hasattr (obj, "ObliqueAngle"):
+                self.shape_string.ObliqueAngle = self.spin_oblique_angle.property('value')
+            if hasattr (obj.ViewObject, "ShowPlacement"):
+                self.shape_string.ViewObject.ShowPlacement = self.checkbox_placement.isChecked()
+            if hasattr (obj.ViewObject, "ShowPlane"):
+                self.shape_string.ViewObject.ShowPlane = self.checkbox_plane.isChecked()
+
+            # copier le texte comme nom dans l'arbre
+            if self.checkbox_set_name.isChecked():
+                self.shape_string.Label = text
+            else:
+                self.shape_string.Label = self.shape_string.Name
+            if not hasattr (self.shape_string, "SetName"):
+                self.shape_string.addProperty("App::PropertyBool","SetName", "Custom")
+            self.shape_string.SetName = self.checkbox_set_name.isChecked()
+
+            axe = Vector(
+                self.spin_axis_x.property('value'),
+                self.spin_axis_y.property('value'),
+                self.spin_axis_z.property('value')
+            )
+            angle = self.spin_angle.property('value')
+            
+            if hasattr (obj, "Justification"):
+                justification = self.combo_justification.currentText()
+                self.shape_string.Justification = self.justification
+                if justification != "":
+                    self.shape_string.Justification = self.combo_justification.currentText()
+
+            self.shape_string.MakeFace = self.checkbox_make_face.isChecked()
+            self.button_color.setEnabled(self.checkbox_make_face.isChecked())
+            self.label_shape_color.setEnabled(self.checkbox_make_face.isChecked())
+            self.update_button_style()
+
+            placement = App.Placement()
+            placement.Base = pos
+            placement.Rotation = Rotation(axe, angle)
+
+            self.shape_string.Placement = placement
+            self.shape_string.ViewObject.ShapeColor = (self.current_color.red(), self.current_color.green(), self.current_color.blue())
+            # self.shape_string.ViewObject.Transparency = int((1.0 - self.alpha) * 100)
+            self.shape_string.ViewObject.Transparency = (255 - self.current_color.alpha()) * 100
+
+
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Error", f"Error when creating the shapestring :\n{e}")
+
+        finally:
+            self._updating = False  # signal reactivation
+            if self.checkbox_recompute.isChecked() or force:
+                FreeCAD.ActiveDocument.recompute()
+
+    def find_parent_group(obj, doc):
+        for group in doc.Objects:
+            if hasattr(group, 'Group') and obj in group.Group:
+                return group, group.Group.index(obj)
+        return None, None
+
+    def load_parameters(self):
+        ### TODO
+        # Fuse
+        # JustificationReference
+        # Keep LeftMargin bool
+        # Scale To Size bool
+        
+        spin_oblique_angle = None
+        justification = None
+        checkbox_placement = None
+        checkbox_plane = None
+
+        if not (Gui.Selection.getSelectionEx() == []): #selection vide
+            s, = Gui.Selection.getSelectionEx()
+            obj = s.Object
+            doc = App.ActiveDocument
+            # si on selectionne une shapestring existante, on récupère les param pour la modifier
+            if obj.Name and obj.TypeId == 'Part::Part2DObjectPython' and obj.Name.startswith('ShapeString'):
+                self.shape_string = obj
+                self.editMode = True
+                set_name = False
+                
+                if hasattr (self.shape_string, "SetName"):
+                    set_name = self.shape_string.SetName
+
+                spin_x = obj.Placement.Base.x
+                spin_y = obj.Placement.Base.y
+                spin_z = obj.Placement.Base.z
+                spin_angle = obj.Placement.Rotation.Angle
+                spin_axis_x = obj.Placement.Rotation.Axis.x
+                spin_axis_y = obj.Placement.Rotation.Axis.y
+                spin_axis_z = obj.Placement.Rotation.Axis.z
+
+                self.spin_x.setProperty("rawValue", spin_x)
+                self.spin_y.setProperty("rawValue", spin_y)
+                self.spin_z.setProperty("rawValue", spin_z)
+                self.spin_angle.setProperty("rawValue", math.degrees(spin_angle))
+                self.spin_axis_x.setProperty("rawValue", spin_axis_x)
+                self.spin_axis_y.setProperty("rawValue", spin_axis_y)
+                self.spin_axis_z.setProperty("rawValue", spin_axis_z)
+
+                last_used_font = s.Object.FontFile
+                text_input = obj.String
+                checkbox_recompute = True
+                checkbox_make_face = obj.MakeFace
+                r, g, b, a = obj.ViewObject.ShapeColor
+                self.current_color = QtGui.QColor.fromRgbF(r, g, b, a)
+
+                spin_size = obj.Size
+                spin_tracking = obj.Tracking
+
+                if hasattr (obj, "ObliqueAngle"):
+                    spin_oblique_angle = obj.ObliqueAngle
+                if hasattr (obj, "Justification"):
+                    justification = obj.Justification
+                if hasattr (obj.ViewObject, "ShowPlacement"):
+                    checkbox_placement = obj.ViewObject.ShowPlacement
+                if hasattr (obj.ViewObject, "ShowPlane"):
+                    checkbox_plane = obj.ViewObject.ShowPlane
+
+        else:
+            ## Load parameters from config file
+            # Checkbox Label
+            set_name = USERPARAM.GetBool("SetName") if PREFPARAM.HasGroup("ShapestringImproved") else True
+            # Dernière police utilisée
+            last_used_font = USERPARAM.GetString("LastFont")
+            # if last_used_font:
+                # index = self.combo_fonts.findData(last_used_font)
+                # if index != -1:
+                    # self.combo_fonts.setCurrentIndex(index)
+            # Texte
+            text_input = USERPARAM.GetString("Text") if PREFPARAM.HasGroup("ShapestringImproved") else "Hello FreeCAD !"
+            # Recompute (QCheckBox)
+            checkbox_recompute = USERPARAM.GetBool("Recompute") if PREFPARAM.HasGroup("ShapestringImproved") else True
+            # Make face (QCheckBox)
+            checkbox_make_face = USERPARAM.GetBool("MakeFace") if PREFPARAM.HasGroup("ShapestringImproved") else True
+            # Couleur (RGBA, valeurs entre 0 et 255)
+            r = USERPARAM.GetInt("ColorRed") if PREFPARAM.HasGroup("ShapestringImproved") else 255
+            g = USERPARAM.GetInt("ColorGreen") if PREFPARAM.HasGroup("ShapestringImproved") else 255
+            b = USERPARAM.GetInt("ColorBlue") if PREFPARAM.HasGroup("ShapestringImproved") else 255
+            a = USERPARAM.GetInt("ColorAlpha") if PREFPARAM.HasGroup("ShapestringImproved") else 255
+            self.current_color = QtGui.QColor.fromRgb(r, g, b, a)
+            # Taille
+            spin_size = USERPARAM.GetFloat("Size") if PREFPARAM.HasGroup("ShapestringImproved") else self.spin_size.property('value')
+            # Tracking
+            spin_tracking = USERPARAM.GetFloat("Tracking") if PREFPARAM.HasGroup("ShapestringImproved") else self.spin_tracking.property('value')
+            # Obliquité
+            spin_oblique_angle = USERPARAM.GetFloat("Oblique") if PREFPARAM.HasGroup("ShapestringImproved") else self.spin_oblique_angle.property('value')
+            # Justification/origine placement
+            justification = USERPARAM.GetString("Justification") or "Bottom-Left"
+            # Show Placement
+            checkbox_placement = USERPARAM.GetBool("ShowPlacement") if PREFPARAM.HasGroup("ShapestringImproved") else False
+            # Show Plane
+            checkbox_plane = USERPARAM.GetBool("ShowPlane") if PREFPARAM.HasGroup("ShapestringImproved") else False
+
+            # self.justification = "Bottom-Left"
+
+        self.checkbox_set_name.setChecked(set_name)
+
+        for i in range(self.combo_fonts.count()):
+            if self.combo_fonts.itemData(i).lower() == last_used_font.lower():
+                index = i
+                if index != -1:
+                    self.combo_fonts.setCurrentIndex(index)
+                    continue
+
+        self.text_input.setProperty("text", text_input)
+        self.checkbox_recompute.setChecked(checkbox_recompute)
+        self.checkbox_make_face.setChecked(checkbox_make_face)
+
+        self.update_button_style()
+        print(spin_size)
+        self.spin_size.setProperty("value", spin_size)
+        self.spin_tracking.setProperty("value", spin_tracking)
+
+        if spin_oblique_angle:
+            self.spin_oblique_angle.setProperty("value", spin_oblique_angle)
+        if justification:
+            self.justification = justification
+        if checkbox_placement:
+            self.checkbox_placement.setChecked(checkbox_placement)
+        if checkbox_plane:
+            self.checkbox_plane.setChecked(checkbox_plane)
+
+    def save_parameters(self):
+        # Set Name in Tree
+        USERPARAM.SetBool("SetName", self.checkbox_set_name.isChecked())
+        # Dernière police utilisée
+        index = self.combo_fonts.currentIndex()
+        font_path = self.combo_fonts.itemData(index)
+        USERPARAM.SetString("LastFont", font_path)
+        # Texte
+        USERPARAM.SetString("Text", str(self.text_input.property('text')))
+        # Recompute
+        USERPARAM.SetBool("Recompute", self.checkbox_recompute.isChecked())
+        # Make face
+        USERPARAM.SetBool("MakeFace", self.checkbox_make_face.isChecked())
+        # Couleur (stockée en int 0–255 )
+        color = self.current_color
+        if color:  # vérifie que c'est bien un QColor
+            USERPARAM.SetInt("ColorRed", color.red())
+            USERPARAM.SetInt("ColorGreen", color.green())
+            USERPARAM.SetInt("ColorBlue", color.blue())
+            USERPARAM.SetInt("ColorAlpha", color.alpha())
+        # Taille
+        USERPARAM.SetFloat("Size", self.spin_size.property('value'))
+        # Tracking
+        USERPARAM.SetFloat("Tracking", self.spin_tracking.property('value'))
+        # Oblique
+        USERPARAM.SetFloat("Oblique", self.spin_oblique_angle.property('value'))
+        # Justification
+        USERPARAM.SetString("Justification", self.combo_justification.currentText())
+        # Show Placement
+        USERPARAM.SetBool("ShowPlacement", self.checkbox_placement.isChecked())
+        # Show Plane
+        USERPARAM.SetBool("ShowPlane", self.checkbox_plane.isChecked())
+
+    def add_font_file(self):
+        # Extensions de fichiers acceptées
+        filters = "Font files (*.ttf *.otf *.ttc *.woff *.woff2);;All files (*)"
+        font_path, _ = QFileDialog.getOpenFileName(None,"Select a font file...","",filters)
+
+        if not font_path:
+            return  # L'utilisateur a annulé
+
+        # Ne pas recharger si déjà présente
+        if any(f["path"] == font_path for f in self.fonts):
+            App.Console.PrintMessage(f"[ShapestringImproved] Font already loaded : {font_path}\n")
+            return
+
+        try:
+            font = TTFont(font_path)
+            name_record = next((n for n in font["name"].names if n.nameID == 4), None)
+            family = name_record.toUnicode() if name_record else os.path.basename(font_path)
+
+            font_entry = {"name": family, "path": font_path}
+            self.fonts.append(font_entry)
+            self.fonts.sort(key=lambda f: f["name"].lower())
+            self.load_fonts_in_combo()
+            USERFONTPARAM.SetString(str(name_record), font_path)
+            App.Console.PrintMessage(f"[ShapestringImproved] Font added : {family} ({font_path})\n")
+
+        except Exception as e:
+            App.Console.PrintError(f"[ShapestringImproved] 01 Read error : {font_path} : {e}\n")
+
+        for i in range(self.combo_fonts.count()):
+            if self.combo_fonts.itemData(i) == font_path:
+                self.combo_fonts.setCurrentIndex(i)
+                break
+        self.scan_and_parse_fonts()
+
+    def add_font_directory(self):
+        folder = QFileDialog.getExistingDirectory(None,"Select a directory...","")
+
+        if not folder:
+            return  # L'utilisateur a annulé
+
+        new_fonts = []
+        seen_paths = {f["path"] for f in self.fonts}
+
+        for root, _, files in os.walk(folder):
+            for file in files:
+                if not file.lower().endswith(FONT_EXTENSIONS):
+                    continue
+
+                full_path = os.path.join(root, file)
+                if full_path in seen_paths:
+                    continue
+
+                try:
+                    font = TTFont(full_path)
+                    name_record = next((n for n in font["name"].names if n.nameID == 4), None)
+                    family = name_record.toUnicode() if name_record else os.path.basename(full_path)
+
+                    if family.startswith("."):
+                        continue  # Ignore les polices système cachées
+
+                    font_entry = {"name": family, "path": full_path}
+                    self.fonts.append(font_entry)
+                    new_fonts.append(font_entry)
+
+                    # Mémorise dans les paramètres
+                    USERFONTPARAM.SetString(family, full_path)
+
+                except Exception as e:
+                    App.Console.PrintError(f"[ShapestringImproved] 02 Read error {full_path} : {e}\n")
+
+        if new_fonts:
+            self.fonts.sort(key=lambda f: f["name"].lower())
+            self.load_fonts_in_combo()
+
+            # Sélectionne la première nouvelle police ajoutée
+            for i in range(self.combo_fonts.count()):
+                if self.combo_fonts.itemData(i) == new_fonts[0]["path"]:
+                    self.combo_fonts.setCurrentIndex(i)
+                    break
+
+            App.Console.PrintMessage(f"[ShapestringImproved] {len(new_fonts)} font(s) added from : {folder}\n")
+        else:
+            App.Console.PrintMessage(f"[ShapestringImproved] No new fonts found in : {folder}\n")
+        self.scan_and_parse_fonts()
+
+    def on_reset_default(self, group=0):
+        if group == 1:
+            self.text_input.setProperty("text", "Hello FreeCAD !")
+            self.checkbox_set_name.setChecked(True)
+        if group == 2:
+            self.spin_x.setProperty("rawValue", 0)
+            self.spin_y.setProperty("rawValue", 0)
+            self.spin_z.setProperty("rawValue", 0)
+        if group == 3:
+            self.spin_angle.setProperty("rawValue", 0)
+            self.spin_axis_x.setProperty("rawValue", 0)
+            self.spin_axis_y.setProperty("rawValue", 0)
+            self.spin_axis_z.setProperty("rawValue", 1)
+        if group == 4:
+            self.checkbox_recompute.setChecked(True)
+            self.checkbox_make_face.setChecked(True)
+            self.spin_size.setProperty("rawValue", 14)
+            self.spin_tracking.setProperty("rawValue", 0)
+            self.spin_oblique_angle.setProperty("rawValue", 0)
+            self.combo_justification.setCurrentIndex(6) # Bottom-Left
+            self.current_color = QtGui.QColor.fromRgb(255, 255, 255, 255)
+            self.update_button_style()
+            self.checkbox_placement.setChecked(False)
+            self.checkbox_plane.setChecked(False)
+            self.update_button_style()
+        else:
+            pass
+        self.update_shapestring(True)
+
+    def eventFilter(self, obj, event):
+        if event.type() == QtCore.QEvent.Show and obj == self.combo_fonts.view().window():
+            QtCore.QTimer.singleShot(0, self.apply_fonts_to_visible_items)
+        return super().eventFilter(obj, event)
+
+    def apply_fonts_to_visible_items(self):
+        view = self.combo_fonts.view()
+        model = self.combo_fonts.model()
+
+        for row in range(self.combo_fonts.count()):
+            index = model.index(row, 0)
+            rect = view.visualRect(index)
+            if not rect.isValid() or not view.viewport().rect().intersects(rect):
+                continue  # l'élément n'est pas visible
+
+            path = self.combo_fonts.itemData(row, QtCore.Qt.UserRole)
+            if not path:
+                continue
+
+            try:
+                # Charger la police (gestion des .ttc avec index)
+                if "," in path:
+                    ttc_path, font_index = path.split(",")
+                    font = TTCollection(ttc_path).fonts[int(font_index)]
+                    actual_path = ttc_path  # pour QtGui.QFontDatabase
+                else:
+                    font = TTFont(path)
+                    actual_path = path
+
+                # Extraire le style (nom typographique, ex: "Regular", "Bold", etc.)
+                style_record = next((n for n in font["name"].names if n.nameID == 2), None)
+                style_str = style_record.toUnicode() if style_record else ""
+
+                # Charger dans Qt
+                font_id = QtGui.QFontDatabase.addApplicationFont(actual_path)
+                if font_id != -1:
+                    families = QtGui.QFontDatabase.applicationFontFamilies(font_id)
+                    if families:
+                        qfont = QtGui.QFont(families[0], 13)
+                        qfont.setStyleName(style_str)
+                        self.combo_fonts.setItemData(row, qfont, QtCore.Qt.FontRole)
+
+            except Exception as e:
+                App.Console.PrintError(f"[ShapestringImproved] apply_fonts_to_visible_items error for {path} : {e}\n")
+
+
+    def remove_user_font_row(self, row, family):
+        # Remove from preferences
+        USERFONTPARAM.RemString(family)
+        # Remove from table
+        self.table_user_fonts.removeRow(row)
+        App.Console.PrintMessage(f"[ShapestringImproved] Font removed : {family}\n")
+        self.scan_and_parse_fonts()
+        self.load_fonts_in_combo()
+
+    def on_user_font_select(self):
+        """ Synchronise selection between Combolist and User font list """
+        selected_items = self.table_user_fonts.selectedItems()
+        if not selected_items:
+            return
+        row = selected_items[0].row()
+        font_name_item = self.table_user_fonts.item(row, 0)
+        if not font_name_item:
+            return
+        font_name = font_name_item.text()
+        index = self.combo_fonts.findText(font_name, QtCore.Qt.MatchFixedString)
+        if index >= 0:
+            self.combo_fonts.setCurrentIndex(index)
+
+    def accept(self):
+        self.update_shapestring(True)
+        self.save_parameters()
+
+    def quit(self):
+        if self.shape_string and not self.editMode:
+            App.ActiveDocument.removeObject(self.shape_string.Name)
+        else:
+            self.save_parameters()
+        self.close()
+
+class ShapestringImprovedTaskPanel:
+    def __init__(self):
+        self.form = ShapestringImproved()
+
+    def getStandardButtons(self):
+        return (QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+
+    def accept(self):
+        self.form.accept()
+        return True
+
+    def reject(self):
+        self.form.quit()
+        return True
+
+# Affichage dans la fenêtre des tâches
+if App.GuiUp:
+    FreeCADGui.Control.closeDialog() # Ferme les dialogues en cours
+    ti = perf_counter()
+    FreeCADGui.Control.showDialog(ShapestringImprovedTaskPanel())
